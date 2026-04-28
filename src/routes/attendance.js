@@ -360,7 +360,7 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
     // >= 6 hours → full day, needs manager review
     // >= 4 hours → half day leave attached, manager review
     // <  4 hours → emergency leave, manager review
-    const AUTO_APPROVE_HOURS = 7;
+    const AUTO_APPROVE_HOURS = 6;
     const isAutoApproved = hoursElapsed >= AUTO_APPROVE_HOURS;
 
     let leaveType = null;
@@ -821,10 +821,6 @@ router.delete('/clear-scan', authenticate, authorize('employee'), async (req, re
   }
 });
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /api/attendance/upload-signed-report
-// Employee uploads the manager-signed PDF/image of the report
-// Manager/Admin can also upload on behalf of employee (pass empId in body)
-// ─────────────────────────────────────────────────────────────────────────────
 router.post(
   '/upload-signed-report',
   authenticate,
@@ -832,21 +828,17 @@ router.post(
   async (req, res) => {
     try {
       if (!req.file) return res.status(400).json({ success: false, message: 'No file provided' });
- 
-      const { month } = req.body; // e.g. "2026-04"
+
+      const { month } = req.body;
       if (!month || !/^\d{4}-\d{2}$/.test(month)) {
         return res.status(400).json({ success: false, message: 'Valid month (YYYY-MM) is required' });
       }
- 
-      // Determine target employee
+
       let targetEmpId = req.user.id;
       if (['manager', 'admin', 'hr', 'super_admin'].includes(req.user.role) && req.body.empId) {
         targetEmpId = req.body.empId;
       }
- 
-      // ── ENFORCE ONE UPLOAD PER MONTH ─────────────────────────────────────
-      // Check if a signed report for this month already exists for this employee.
-      // Only employees are blocked — admins/HR can always upload (for overrides).
+
       if (req.user.role === 'employee') {
         const existingUser = await User.findById(targetEmpId).select('signed_reports').lean();
         const alreadyExists = (existingUser?.signed_reports || []).some(r => r.month === month);
@@ -857,19 +849,18 @@ router.post(
           });
         }
       }
-      // ─────────────────────────────────────────────────────────────────────
- 
+
       const monthLabel = new Date(`${month}-01`).toLocaleDateString('en-IN', {
         month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata',
       });
- 
+
       const signedPath = await uploadFile(
         req.file.buffer,
         'ams/signed-reports',
         req.file.originalname,
         req.file.mimetype,
       );
- 
+
       const entry = {
         path:        signedPath,
         name:        req.file.originalname,
@@ -878,15 +869,24 @@ router.post(
         uploaded_at: new Date(),
         uploaded_by: req.user.id,
       };
- 
-      // Push to user.signed_reports array
+
+      // ── Purge entries older than 3 months before inserting new one ────────
+      const cutoff = new Date();
+      cutoff.setMonth(cutoff.getMonth() - 3);
+
+      await User.findByIdAndUpdate(
+        targetEmpId,
+        { $pull: { signed_reports: { uploaded_at: { $lt: cutoff } } } },
+        { strict: false },
+      );
+      // ──────────────────────────────────────────────────────────────────────
+
       await User.findByIdAndUpdate(
         targetEmpId,
         { $push: { signed_reports: entry } },
         { strict: false },
       );
- 
-      // Notify manager if employee uploaded
+
       if (req.user.role === 'employee') {
         const emp = await User.findById(req.user.id).select('name manager_id').lean();
         if (emp?.manager_id) {
@@ -898,14 +898,14 @@ router.post(
           );
         }
       }
- 
+
       await AuditLog.create({
         _id: uuidv4(), user_id: req.user.id,
         action: 'UPLOAD_SIGNED_REPORT',
         entity_type: 'user', entity_id: targetEmpId,
         new_value: `${month} signed report`,
       });
- 
+
       res.status(201).json({
         success: true,
         message: `Signed report uploaded for ${monthLabel}`,
@@ -957,23 +957,33 @@ router.delete('/signed-reports/:empId/:month', authenticate, authorize('manager'
   }
 });
 // ─────────────────────────────────────────────────────────────────────────────
-// GET /api/attendance/signed-reports/:empId
-// Manager/Admin view — get all signed reports for an employee
-// ─────────────────────────────────────────────────────────────────────────────
-router.get('/signed-reports/:empId', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
+router.get('/signed-reports/:empId', authenticate, async (req, res) => {
   try {
+    // Employees can fetch their own; staff can fetch anyone
+    const isOwnRequest = req.user.id === req.params.empId;
+    if (!isOwnRequest && !['manager', 'admin', 'hr', 'super_admin'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
     const emp = await User.findById(req.params.empId).select('signed_reports name emp_id').lean();
     if (!emp) return res.status(404).json({ success: false, message: 'Employee not found' });
- 
-    const reports = (emp.signed_reports || []).map(r => ({
-      path:        r.path,
-      name:        r.name,
-      month:       r.month,
-      monthLabel:  r.month_label,
-      uploadedAt:  r.uploaded_at,
-      uploadedBy:  r.uploaded_by,
-    }));
- 
+
+    // ── Only return reports from the last 3 months ────────────────────────
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - 3);
+    // ──────────────────────────────────────────────────────────────────────
+
+    const reports = (emp.signed_reports || [])
+      .filter(r => new Date(r.uploaded_at) >= cutoff)   // ← 3-month filter
+      .map(r => ({
+        path:       r.path,
+        name:       r.name,
+        month:      r.month,
+        monthLabel: r.month_label,
+        uploadedAt: r.uploaded_at,
+        uploadedBy: r.uploaded_by,
+      }));
+
     res.json({ success: true, data: reports });
   } catch (err) {
     console.error(err);
