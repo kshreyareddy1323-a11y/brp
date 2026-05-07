@@ -39,18 +39,9 @@ const userSchema = new mongoose.Schema({
   // ── Account lockout ─────────────────────────────────────────────────
   failed_login_attempts: { type: Number, default: 0 },
   login_locked_until:    { type: Date, default: null },
-  // ── Scan papers (array, max 2 per month) ────────────────────────────
-  scan_papers: {
-    type: [{
-      path:        { type: String, required: true },   // Cloudinary URL
-      month:       { type: String, required: true },   // "2026-04"
-      month_label: { type: String, default: null },    // "April 2026"
-      file_name:   { type: String, default: null },    // original filename
-      file_index:  { type: Number, default: 0 },       // 0 or 1
-      uploaded_at: { type: Date,   default: Date.now },
-    }],
-    default: [],
-  },
+// ── Profile Photo (uploaded once, locked) ─────────────────────────────────
+profile_photo_path:     { type: String, default: null },   // Cloudinary URL
+profile_photo_uploaded: { type: Date,   default: null },   // when it was uploaded
   // Legacy single-scan fields kept for backwards compat
   scan_paper_path:     { type: String, default: null },
   scan_paper_uploaded: { type: String, default: null },

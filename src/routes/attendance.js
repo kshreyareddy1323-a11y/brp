@@ -177,13 +177,13 @@ router.get('/today', authenticate, async (req, res) => {
     ]);
 
     // Block check: previous-day missed-checkout still Pending manager action
-    const missedCheckoutBlock = await AttendanceRecord.findOne({
-      emp_id:              req.user.id,
-      date:                { $lt: today },
-      is_missed_checkout:  true,
-      status:              'Pending',
-      checkout_time:       null,
-    }).sort({ date: -1 }).lean();
+  const missedCheckoutBlock = await AttendanceRecord.findOne({
+  emp_id:        req.user.id,
+  date:          { $lt: today },
+  checkin_time:  { $ne: null },
+  checkout_time: null,
+  status:        { $in: ['Pending', 'Draft'] },
+}).sort({ date: -1 }).lean();
 
     res.json({
       success:                  true,
@@ -238,20 +238,22 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
 
     // Block if a previous missed-checkout is still Pending
     const missedBlock = await AttendanceRecord.findOne({
-      emp_id:             req.user.id,
-      date:               { $lt: today },
+  emp_id:        req.user.id,
+  date:          { $lt: today },
+  checkin_time:  { $ne: null },
+  checkout_time: null,
+  status:        { $in: ['Pending', 'Draft'] },
+}).sort({ date: -1 }).lean();
+
+if (missedBlock && missedBlock.status === 'Draft') {
+  await AttendanceRecord.findByIdAndUpdate(missedBlock._id, {
+    $set: {
       is_missed_checkout: true,
       status:             'Pending',
-      checkout_time:      null,
-    }).lean();
-
-    if (missedBlock) {
-      return res.status(403).json({
-        success: false,
-        message: `You did not check out on ${missedBlock.date}. Your attendance has been sent to your manager. You can check in again once your manager approves or rejects it.`,
-        blockedByMissedCheckout: formatRecord(missedBlock),
-      });
-    }
+      checkout_remarks:   'Employee did not check out. Requires manager approval.',
+    },
+  });
+}
 
     const existing = await AttendanceRecord.findOne({ emp_id: req.user.id, date: today }).lean();
     let existingRejectedLeaveId = null;
@@ -406,9 +408,10 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
       updateFields.status       = 'Approved';
       updateFields.actioned_by  = null; // system-approved
       updateFields.actioned_at  = now;
-      updateFields.manager_remark = 'Auto-approved: worked 7+ hours';
-    } else {
-      updateFields.status = 'Pending';
+      updateFields.manager_remark = `Auto-approved: worked ${workedHours.toFixed(1)} hours`;
+} else {
+  updateFields.status = 'Pending';
+  updateFields.manager_remark = `Worked ${workedHours.toFixed(1)} hours`;
     }
 
     await AttendanceRecord.findByIdAndUpdate(record._id, { $set: updateFields });
@@ -525,14 +528,35 @@ router.post('/apply-leave', authenticate, authorize('employee'), [
 // ─────────────────────────────────────────────────────────────────────────────
 router.put('/:id/approve', authenticate, authorize('manager', 'admin'), async (req, res) => {
   try {
+    const today = istDateStr();
     const { remark } = req.body;
     const record = await AttendanceRecord.findById(req.params.id).lean();
     if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
 
-    if (req.user.role === 'manager') {
-      if (record.manager_id !== req.user.id) return res.status(403).json({ success: false, message: 'Not your team member' });
-      if (!['Pending', 'Rejected'].includes(record.status)) return res.status(400).json({ success: false, message: 'Cannot approve in current state' });
-    }
+  if (req.user.role === 'manager') {
+  if (record.manager_id !== req.user.id)
+    return res.status(403).json({ success: false, message: 'Not your team member' });
+
+  const isMissedDraft =
+    record.status === 'Draft' &&
+    record.checkin_time &&
+    !record.checkout_time &&
+    record.date < today;
+
+  if (!['Pending', 'Rejected'].includes(record.status) && !isMissedDraft)
+    return res.status(400).json({ success: false, message: 'Cannot approve in current state' });
+
+  // Promote Draft → Pending inline before approving
+  if (isMissedDraft) {
+    await AttendanceRecord.findByIdAndUpdate(record._id, {
+      $set: {
+        is_missed_checkout: true,
+        status:             'Pending',
+        checkout_remarks:   'Employee did not check out. Requires manager approval.',
+      },
+    });
+  }
+}
 
     const isAdmin = req.user.role === 'admin';
     const update  = { status: 'Approved', manager_remark: remark || '', actioned_by: req.user.id, actioned_at: new Date() };
@@ -577,6 +601,24 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
     if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
     if (req.user.role === 'manager' && record.manager_id !== req.user.id)
       return res.status(403).json({ success: false, message: 'Not your team member' });
+
+    // ── Promote stale Draft missed-checkout so reject goes through ──
+    const today = istDateStr();
+    if (
+      record.status === 'Draft' &&
+      record.checkin_time &&
+      !record.checkout_time &&
+      record.date < today
+    ) {
+      await AttendanceRecord.findByIdAndUpdate(record._id, {
+        $set: {
+          is_missed_checkout: true,
+          status:             'Pending',
+          checkout_remarks:   'Employee did not check out. Requires manager approval.',
+        },
+      });
+    }
+    // ───────────────────────────────────────────────────────────────
 
     const update = { status: 'Rejected', manager_remark: remark, actioned_by: req.user.id, actioned_at: new Date() };
     if (record.leave_type) update.leave_status = 'Rejected';

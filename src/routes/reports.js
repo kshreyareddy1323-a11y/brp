@@ -86,7 +86,40 @@ const expandDates = (start, end) => {
   return out;
 };
 
-const isWeekend = iso => { const d=new Date(iso+'T00:00:00+05:30').getDay(); return d===0||d===6; };
+const HOLIDAYS_MMDD = new Set([
+  '01-14','01-23','01-26','03-04','03-21','04-03','04-14','04-15','04-21',
+  '05-01','05-26','05-27','06-26','07-22','08-04','08-15','08-19','08-26',
+  '09-04','10-02','10-17','10-19','10-20','10-21','10-22','10-23','10-26',
+  '11-09','12-25',
+]);
+const RESTRICTED_MMDD = new Set([
+  '01-01','03-03','03-25','03-31','06-20','07-16','08-12','08-28',
+  '09-11','09-18','11-11','11-24','12-03','12-24',
+]);
+
+const isHoliday = iso => {
+  const mmdd = iso.substring(5);
+  return HOLIDAYS_MMDD.has(mmdd) || RESTRICTED_MMDD.has(mmdd);
+};
+
+const getNthSaturday = iso => {
+  const d = new Date(iso + 'T00:00:00+05:30');
+  if (d.getDay() !== 6) return 0;
+  let count = 0;
+  for (let i = 1; i <= d.getDate(); i++) {
+    if (new Date(d.getFullYear(), d.getMonth(), i).getDay() === 6) count++;
+  }
+  return count;
+};
+
+const isNonWorkingDay = iso => {
+  const dow = new Date(iso + 'T00:00:00+05:30').getDay();
+  if (dow === 0) return true;                          // Sunday
+  if (dow === 6) { const n = getNthSaturday(iso); return n === 2 || n === 4; } // 2nd/4th Sat
+  return false;
+};
+
+const isWeekend = iso => isNonWorkingDay(iso); // kept for PDF total WO count
 const dayNum    = iso => new Date(iso+'T00:00:00+05:30').getDate();
 const monAbbr   = iso => new Date(iso+'T00:00:00+05:30').toLocaleDateString('en-IN',{timeZone:IST,month:'short'});
 const ordinal   = n   => { const s=['th','st','nd','rd'],v=n%100; return n+(s[(v-20)%10]||s[v]||s[0]); };
@@ -216,8 +249,8 @@ router.get('/export',
     const multiMonth = new Date(startDate+'T00:00:00+05:30').getMonth() !==
                        new Date(endDate  +'T00:00:00+05:30').getMonth();
     const totalDays  = dates.length;
-    const woCount    = dates.filter(isWeekend).length;
-
+ const woCount    = dates.filter(isNonWorkingDay).length;
+    const holCount   = dates.filter(d => !isNonWorkingDay(d) && isHoliday(d)).length;
     // ── Employee list ──────────────────────────────────────────────────────────
     // Priority: employee (own) → specific empId → managerId team → manager (own team) → all
     let employees = [];
@@ -304,11 +337,12 @@ router.get('/export',
       const ab = emp.assigned_block    || null;
       const ad = emp.assigned_district || null;
 
-      return {
+    return {
         emp,
         cells: dates.map(iso => {
-          if (isWeekend(iso))                 return 'WO';
+          if (isNonWorkingDay(iso))           return 'WO'; // Sunday or 2nd/4th Sat
           if (joinDate && iso < joinDate)     return '';   // pre-join → blank
+          if (isHoliday(iso))                 return 'H';  // public holiday
           const rec = recIdx[String(emp._id)]?.[iso];
           return toCode(rec, ab, ad);
         }),
@@ -334,11 +368,13 @@ router.get('/export',
       const FILL_ALT  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFF7F7F7'}};
       const FILL_SUBH = {type:'pattern',pattern:'solid',fgColor:{argb:'FFE8EDF4'}};
 
+   const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
       const codeFill = (code, rf) => {
         if (code==='L'||code==='A') return FILL_RED;
         if (code==='WO')            return FILL_WO;
+        if (code==='H')             return FILL_HOL;
         return rf;
-      };
+      };   
 
       const TH  = ()=>({style:'thin',  color:{argb:'FFCCCCCC'}});
       const MED = ()=>({style:'medium',color:{argb:'FF999999'}});
@@ -352,7 +388,7 @@ router.get('/export',
           };
       };
 
-      const buildSheet = (ws, empList, sheetTitle, mgrName) => {
+      const buildSheet = (ws, empList, sheetTitle, mgrName,hCount=0) => {
         const LAST = 3+dates.length;
 
         // ── Rows 1-3: header ──────────────────────────────────────────────────
@@ -399,18 +435,21 @@ router.get('/export',
 
         // ── Legend ────────────────────────────────────────────────────────────
         const legendRow=5+empList.length+1; ws.getRow(legendRow).height=14;
+       const FILL_AMB = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
         [{code:'P',label:'Present (assigned location)',isRed:false},
          {code:'OD',label:'On Duty (other Tripura location)',isRed:false},
+         {code:'H',label:'Public Holiday',isRed:false,isAmber:true},
          {code:'L',label:'Leave / LOP',isRed:true},
          {code:'A',label:'Absent',isRed:true},
          {code:'WO',label:'Week Off',isRed:false},
-        ].forEach(({code,label,isRed},i)=>{
+        ].forEach(({code,label,isRed,isAmber},i)=>{
           const cc=ws.getCell(legendRow,4+i*2);
-          cc.value=code; cc.fill=isRed?FILL_RED:FILL_WHT; cc.border=CBDR;
+          cc.value=code; cc.fill=isRed?FILL_RED:isAmber?FILL_AMB:FILL_WHT; cc.border=CBDR;
           cc.alignment={horizontal:'center',vertical:'center'};
-          cc.font={bold:true,size:8,name:'Calibri',color:{argb:isRed?'FFFFFFFF':'FF000000'}};
+          cc.font={bold:true,size:8,name:'Calibri',color:{argb:isRed?'FFFFFFFF':isAmber?'FFD97706':'FF000000'}};
           ws.getCell(legendRow,4+i*2+1).value=label;
           ws.getCell(legendRow,4+i*2+1).font={size:8,name:'Calibri',italic:true};
+        
         });
 
         // ── Summary ───────────────────────────────────────────────────────────
@@ -435,7 +474,7 @@ router.get('/export',
 
         sumRow('No of Total Days',totalDays);
         sumRow('No of Weekoff (WO)',woCount);
-        sumRow('No of Holidays (H)',0);
+        sumRow('No of Holidays (H)',hCount);
 
         if(empList.length===1){
           const er=5;
@@ -530,14 +569,14 @@ router.get('/export',
       };
 
       if(role==='employee'){
-        buildSheet(wb.addWorksheet('My Attendance'),matrix,`${matrix[0]?.emp.name} Summary`,managerName);
+        buildSheet(wb.addWorksheet('My Attendance'),matrix,`${matrix[0]?.emp.name} Summary`,managerName,holCount);
       } else {
         const allName =role==='manager'?'Team Report':'All emp Reports';
         const allTitle=role==='manager'?'Team Summary':'Total Summary';
-        buildSheet(wb.addWorksheet(allName),matrix,allTitle,managerName);
+        buildSheet(wb.addWorksheet(allName),matrix,allTitle,managerName,holCount);
         matrix.forEach(({emp,cells})=>{
           const name=emp.name.replace(/[:\\/?*[\]]/g,'').substring(0,31);
-          buildSheet(wb.addWorksheet(name),[{emp,cells}],`${emp.name} Summary`,managerName);
+          buildSheet(wb.addWorksheet(name),[{emp,cells}],`${emp.name} Summary`,managerName,holCount);
         });
       }
 
@@ -600,10 +639,10 @@ router.get('/export',
         cells.forEach((code,i)=>{
           const x=xD+i*dW;
           const isRed=code==='L'||code==='A';
-          const cellBg=isRed?'#FF4444':code==='WO'?'#BDD7EE':bg;
+          const cellBg=isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':bg;
           doc.rect(x,y,dW,RH).fill(cellBg).stroke('#CCC');
           if(code){
-            doc.fillColor(isRed?'#FFFFFF':'#000000').fontSize(6).font('Helvetica-Bold')
+            doc.fillColor(isRed?'#FFFFFF':code==='H'?'#D97706':'#000000').fontSize(6).font('Helvetica-Bold')
                .text(code,x+1,y+3,{width:dW-2,align:'center'});
           }
           if(code==='P'||code==='OD') pres++;
@@ -648,7 +687,7 @@ router.get('/export',
       pdfRow(summaryTitle,undefined,'title');
       pdfRow('No of Total Days',totalDays);
       pdfRow('No of Weekoff (WO)',woCount);
-      pdfRow('No of Holidays (H)',0);
+      pdfRow('No of Holidays (H)',holCount);
 
       if (matrix.length === 1) {
         const cells = matrix[0].cells;
