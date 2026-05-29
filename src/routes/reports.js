@@ -115,7 +115,7 @@ const getNthSaturday = iso => {
 const isNonWorkingDay = iso => {
   const dow = new Date(iso + 'T00:00:00+05:30').getDay();
   if (dow === 0) return true;                          // Sunday
-  if (dow === 6) { const n = getNthSaturday(iso); return n === 2 || n === 4; } // 2nd/4th Sat
+  if (dow === 6) return true;
   return false;
 };
 
