@@ -140,19 +140,12 @@ router.get('/', authenticate, async (req, res) => {
     if (onlyLeaves === 'true') match.leave_type = { $ne: null };
 
     if (status) {
-      const isManagerOrAdmin = ['manager', 'admin', 'hr', 'super_admin'].includes(req.user.role);
-      if (status === 'Pending' && isManagerOrAdmin) {
-        const todayIST = istDateStr();
-        match.$or = [
-          { status: 'Pending' },
-          { status: 'Draft', date: { $lt: todayIST }, checkin_time: { $ne: null }, checkout_time: null },
-        ];
-      } else if (onlyLeaves === 'true') {
-        match.leave_status = status;
-      } else {
-        match.status = status;
-      }
-    }
+  if (onlyLeaves === 'true') {
+    match.leave_status = status;
+  } else {
+    match.status = status;
+  }
+}
 
     if (startDate) match.date = { ...match.date, $gte: startDate };
     if (endDate)   match.date = { ...match.date, $lte: endDate };
@@ -162,17 +155,17 @@ router.get('/', authenticate, async (req, res) => {
       recordListPipeline(match, { date: -1, created_at: -1 }, offset, limit)
     );
 
-    const todayIST = istDateStr();
-    const formatted = records.map(r => {
-      const rec = formatRecord(r);
-      if (r.status === 'Draft' && r.date < todayIST && r.checkin_time && !r.checkout_time) {
-        rec.isMissedCheckout = true;
-        rec.status           = 'Pending';
-        rec.checkoutRemarks  = rec.checkoutRemarks || 'Employee did not check out. Requires manager approval.';
-      }
-      return rec;
-    });
-
+    // const todayIST = istDateStr();
+    // const formatted = records.map(r => {
+    //   const rec = formatRecord(r);
+    //   if (r.status === 'Draft' && r.date < todayIST && r.checkin_time && !r.checkout_time) {
+    //     rec.isMissedCheckout = true;
+    //     rec.status           = 'Pending';
+    //     rec.checkoutRemarks  = rec.checkoutRemarks || 'Employee did not check out. Requires manager approval.';
+    //   }
+    //   return rec;
+    // });
+const formatted = records.map(formatRecord);
     res.json({ success: true, data: formatted, pagination: { total, page, limit, pages: Math.ceil(total / limit) } });
   } catch (err) {
     console.error(err);
@@ -663,15 +656,17 @@ router.put('/:id/approve', authenticate, authorize('manager', 'admin'), async (r
       const emp = await User.findOne({ _id: record.emp_id, manager_id: req.user.id }).lean();
       if (!emp) return res.status(403).json({ success: false, message: 'Not your team member' });
 
-      const isMissedDraft = record.status === 'Draft' && record.checkin_time && !record.checkout_time && record.date < today;
-      if (!['Pending', 'Rejected'].includes(record.status) && !isMissedDraft)
-        return res.status(400).json({ success: false, message: 'Cannot approve in current state' });
+      // const isMissedDraft = record.status === 'Draft' && record.checkin_time && !record.checkout_time && record.date < today;
+      // if (!['Pending', 'Rejected'].includes(record.status) && !isMissedDraft)
+      //   return res.status(400).json({ success: false, message: 'Cannot approve in current state' });
 
-      if (isMissedDraft) {
-        await AttendanceRecord.findByIdAndUpdate(record._id, {
-          $set: { is_missed_checkout: true, status: 'Pending', checkout_remarks: 'Employee did not check out. Requires manager approval.' },
-        });
-      }
+      // if (isMissedDraft) {
+      //   await AttendanceRecord.findByIdAndUpdate(record._id, {
+      //     $set: { is_missed_checkout: true, status: 'Pending', checkout_remarks: 'Employee did not check out. Requires manager approval.' },
+      //   });
+      // }
+      if (!['Pending', 'Rejected'].includes(record.status))
+  return res.status(400).json({ success: false, message: 'Cannot approve in current state' });
     }
 
     const isAdmin = req.user.role === 'admin';
