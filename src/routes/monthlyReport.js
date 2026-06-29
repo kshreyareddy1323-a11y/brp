@@ -4,6 +4,7 @@ const multer     = require('multer');
 const cloudinary = require('cloudinary').v2;
 const { authenticate: protect } = require('../middleware/auth');
 const { MonthlyReport } =require('../models/database');
+const { employeeFolderLabel } = require('../utils/folderLabel');
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -52,8 +53,9 @@ router.post('/upload', protect, upload.single('file'), async (req, res) => {
     // Upload to Cloudinary
 const isImage = req.file.mimetype.startsWith('image/');
 const isPdf   = req.file.mimetype === 'application/pdf';
+const monthlyFolderLabel = await employeeFolderLabel(req.user.id, { emp_id: req.user.emp_id });
 const result  = await uploadToCloudinary(req.file.buffer, {
-  folder:          `ams/employees/${req.user.emp_id || req.user.id}/monthly_reports`,
+  folder:          `ams/employees/${monthlyFolderLabel}/monthly_reports`,
   resource_type:   (isImage || isPdf) ? 'image' : 'raw',  // PDFs upload as 'image' → served inline
   public_id:       `${req.user.id}_${month_key}`,
   use_filename:    true,

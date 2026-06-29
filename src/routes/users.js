@@ -7,6 +7,7 @@ const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
 const { User, AttendanceRecord, Notification, AuditLog } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
+const { slugify } = require('../utils/folderLabel');
 const { sendMail } = require('../utils/mailer');
 const path            = require('path');
 const { uploadFile }  = require('../utils/storage');
@@ -646,7 +647,7 @@ router.post(
         return res.status(400).json({ success: false, message: 'No photo provided' });
       }
  
-      const user = await User.findById(req.user.id).select('profile_photo_path profile_photo_uploaded role').lean();
+      const user = await User.findById(req.user.id).select('profile_photo_path profile_photo_uploaded role name emp_id').lean();
  
       // ── FIX 2A: Check if user role is allowed ────────────────────────────
       if (!['employee'].includes(user?.role)) {
@@ -667,9 +668,10 @@ router.post(
         });
       }
  
+      const profileFolderLabel = `${slugify(user?.name)}(${user?.emp_id || req.user.emp_id || req.user.id})`;
       const photoPath = await uploadFile(
         req.file.buffer,
-        `ams/employees/${req.user.emp_id || req.user.id}/profile-photos`,
+        `ams/employees/${profileFolderLabel}/profile-photos`,
         req.file.originalname,
         req.file.mimetype,
       );

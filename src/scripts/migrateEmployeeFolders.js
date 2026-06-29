@@ -1,7 +1,7 @@
 /**
  * ONE-TIME MIGRATION
  * Moves existing Cloudinary assets out of flat/old folders into
- * ams/employees/{emp_id}/<subfolder>/... and updates the matching
+ * ams/employees/{Name}({emp_id})/<subfolder>/... and updates the matching
  * MongoDB documents so the stored URLs stay valid.
  *
  * Run from the project root (same place you'd run `node server.js`):
@@ -25,6 +25,14 @@ cloudinary.config({
 });
 
 const DRY_RUN = process.argv.includes('--dry-run');
+
+/* ── Folder label: "Name(emp_id)", e.g. "Sravya(emp001)" ──────────────── */
+function slugify(name) {
+  return (name || 'Unknown').trim().replace(/[\/\\?%*:|"<>]/g, '').replace(/\s+/g, '_');
+}
+function folderLabel(name, empId) {
+  return `${slugify(name)}(${empId || 'unknown'})`;
+}
 
 /* ── Build an index of every resource living under the OLD prefixes ───────
    so we can look up { public_id, resource_type } from a stored secure_url
@@ -53,13 +61,13 @@ async function buildUrlIndex() {
   return index;
 }
 
-function newPublicId(oldPublicId, empId, subfolder) {
+function newPublicId(oldPublicId, label, subfolder) {
   // keep just the filename portion, drop the old folder prefix entirely
   const base = oldPublicId.split('/').pop();
-  return `ams/employees/${empId}/${subfolder}/${base}`;
+  return `ams/employees/${label}/${subfolder}/${base}`;
 }
 
-async function moveAsset(urlIndex, oldUrl, empId, subfolder) {
+async function moveAsset(urlIndex, oldUrl, label, subfolder) {
   if (!oldUrl || typeof oldUrl !== 'string') return oldUrl;
   if (oldUrl.includes('/ams/employees/')) return oldUrl; // already migrated
   const found = urlIndex.get(oldUrl);
@@ -68,7 +76,7 @@ async function moveAsset(urlIndex, oldUrl, empId, subfolder) {
     return oldUrl;
   }
   const { public_id, resource_type } = found;
-  const to_public_id = newPublicId(public_id, empId, subfolder);
+  const to_public_id = newPublicId(public_id, label, subfolder);
   if (DRY_RUN) {
     console.log(`  [dry-run] ${public_id} -> ${to_public_id}`);
     return oldUrl;
@@ -82,7 +90,8 @@ async function migrateProfilePhotos(urlIndex) {
   console.log('\n== Profile photos ==');
   const users = await User.find({ profile_photo_path: { $exists: true, $ne: null } });
   for (const u of users) {
-    const newUrl = await moveAsset(urlIndex, u.profile_photo_path, u.emp_id, 'profile-photos');
+    const label  = folderLabel(u.name, u.emp_id);
+    const newUrl = await moveAsset(urlIndex, u.profile_photo_path, label, 'profile-photos');
     if (newUrl !== u.profile_photo_path && !DRY_RUN) {
       u.profile_photo_path = newUrl;
       await u.save();
@@ -96,16 +105,17 @@ async function migrateScansAndSignedReports(urlIndex) {
     $or: [{ scan_papers: { $exists: true, $ne: [] } }, { signed_reports: { $exists: true, $ne: [] } }],
   });
   for (const u of users) {
+    const label = folderLabel(u.name, u.emp_id);
     let changed = false;
     if (Array.isArray(u.scan_papers)) {
       for (const s of u.scan_papers) {
-        const newUrl = await moveAsset(urlIndex, s.path, u.emp_id, 'scans');
+        const newUrl = await moveAsset(urlIndex, s.path, label, 'scans');
         if (newUrl !== s.path) { s.path = newUrl; changed = true; }
       }
     }
     if (Array.isArray(u.signed_reports)) {
       for (const r of u.signed_reports) {
-        const newUrl = await moveAsset(urlIndex, r.path, u.emp_id, 'signed-reports');
+        const newUrl = await moveAsset(urlIndex, r.path, label, 'signed-reports');
         if (newUrl !== r.path) { r.path = newUrl; changed = true; }
       }
     }
@@ -123,19 +133,19 @@ async function migrateAttendanceSelfiesAndReapplyDocs(urlIndex) {
     ],
   });
   for (const rec of records) {
-    const owner = await User.findById(rec.emp_id).select('emp_id').lean();
-    const empId = owner?.emp_id || rec.emp_id;
+    const owner = await User.findById(rec.emp_id).select('emp_id name').lean();
+    const label = folderLabel(owner?.name, owner?.emp_id || rec.emp_id);
     let changed = false;
 
-    const newSelfie = await moveAsset(urlIndex, rec.selfie_path, empId, 'selfies');
+    const newSelfie = await moveAsset(urlIndex, rec.selfie_path, label, 'selfies');
     if (newSelfie !== rec.selfie_path) { rec.selfie_path = newSelfie; changed = true; }
 
-    const newCheckoutSelfie = await moveAsset(urlIndex, rec.checkout_selfie_path, empId, 'selfies');
+    const newCheckoutSelfie = await moveAsset(urlIndex, rec.checkout_selfie_path, label, 'selfies');
     if (newCheckoutSelfie !== rec.checkout_selfie_path) { rec.checkout_selfie_path = newCheckoutSelfie; changed = true; }
 
     if (Array.isArray(rec.reapply_docs)) {
       for (let i = 0; i < rec.reapply_docs.length; i++) {
-        const newUrl = await moveAsset(urlIndex, rec.reapply_docs[i], empId, 'reapply-docs');
+        const newUrl = await moveAsset(urlIndex, rec.reapply_docs[i], label, 'reapply-docs');
         if (newUrl !== rec.reapply_docs[i]) { rec.reapply_docs[i] = newUrl; changed = true; }
       }
     }
@@ -150,7 +160,9 @@ async function migrateActivityDocs(urlIndex) {
     // file_path looks like .../ams/users/{emp_id}/activity-docs/...
     const m = d.file_path.match(/\/ams\/users\/([^/]+)\/activity-docs\//);
     const empId = m ? m[1] : 'unknown';
-    const newUrl = await moveAsset(urlIndex, d.file_path, empId, 'activity-docs');
+    const owner = await User.findOne({ emp_id: empId }).select('name emp_id').lean();
+    const label = folderLabel(owner?.name, owner?.emp_id || empId);
+    const newUrl = await moveAsset(urlIndex, d.file_path, label, 'activity-docs');
     if (newUrl !== d.file_path && !DRY_RUN) { d.file_path = newUrl; await d.save(); }
   }
 }
@@ -159,10 +171,10 @@ async function migrateMonthlyReports(urlIndex) {
   console.log('\n== Monthly reports ==');
   const reports = await MonthlyReport.find({ file_url: { $exists: true, $ne: null } });
   for (const r of reports) {
-    const owner = await User.findById(r.user_id).select('emp_id').lean();
-    const empId = owner?.emp_id || r.user_id;
+    const owner = await User.findById(r.user_id).select('emp_id name').lean();
+    const label = folderLabel(owner?.name, owner?.emp_id || r.user_id);
     if (!r.public_id) { console.warn(`  ! MonthlyReport ${r._id} has no public_id, skipping`); continue; }
-    const to_public_id = `ams/employees/${empId}/monthly_reports/${r.public_id.split('/').pop()}`;
+    const to_public_id = `ams/employees/${label}/monthly_reports/${r.public_id.split('/').pop()}`;
     if (r.file_url.includes('/ams/employees/')) continue;
     if (DRY_RUN) { console.log(`  [dry-run] ${r.public_id} -> ${to_public_id}`); continue; }
     const resource_type = r.file_type?.startsWith('image/') || r.file_type === 'application/pdf' ? 'image' : 'raw';
@@ -175,7 +187,7 @@ async function migrateMonthlyReports(urlIndex) {
 }
 
 (async () => {
- await mongoose.connect(process.env.MONGO_URI);
+  await mongoose.connect(process.env.MONGO_URI);
   console.log(DRY_RUN ? 'Running in DRY-RUN mode (no changes will be made)\n' : 'Running migration for real\n');
 
   console.log('Indexing existing Cloudinary resources under old folders...');
